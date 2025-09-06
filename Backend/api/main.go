@@ -7,17 +7,15 @@ import (
 	"log"
 	"net/http"
 
-	firebase "firebase.google.com/go/v4" // ✅ Missing in your imports
-	"firebase.google.com/go/v4/db"       // ✅ Needed to use db.Client
-	"github.com/gorilla/mux"             // ✅ Needed for routing
+	firebase "firebase.google.com/go/v4"
+	"firebase.google.com/go/v4/db"
+	"github.com/gorilla/mux"
 	"google.golang.org/api/option"
 )
 
 var client *db.Client
 
 const firebaseURL = "https://projetedb-2224f-default-rtdb.firebaseio.com/"
-
-// Replace this with your actual JSON key file path
 const keyPath = "dbKey.json"
 
 type carData struct {
@@ -27,14 +25,31 @@ type carData struct {
 	TimeStamp      float64 `json:"timestamp"`
 }
 
+// Middleware para habilitar CORS
+func enableCORS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Permitir origens específicas (ou usar * para desenvolvimento)
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+
+		// Handle preflight requests
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
 func main() {
-	ctx := context.Background() // ✅ FIXED: you forgot the `:=`
+	ctx := context.Background()
 
 	conf := &firebase.Config{
 		DatabaseURL: firebaseURL,
 	}
 
-	// ✅ FIXED: format string usage — don't use fmt.Sprfloat64 like this
 	opt := option.WithCredentialsFile(keyPath)
 
 	app, err := firebase.NewApp(ctx, conf, opt)
@@ -50,10 +65,29 @@ func main() {
 
 	// Set up router
 	r := mux.NewRouter()
+
+	// Adicionar middleware CORS
+	r.Use(enableCORS)
+
+	// Adicionar rota para health check
+	r.HandleFunc("/health", healthHandler).Methods("GET")
 	r.HandleFunc("/data", getDataHandler).Methods("GET")
 
 	fmt.Println("🚀 Server is running on http://localhost:8080")
+	fmt.Println("📊 Dashboard endpoint: http://localhost:8080/data")
+	fmt.Println("❤️  Health check: http://localhost:8080/health")
+
 	log.Fatal(http.ListenAndServe(":8080", r))
+}
+
+// Health check handler
+func healthHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	response := map[string]string{
+		"status":  "ok",
+		"message": "API is running",
+	}
+	json.NewEncoder(w).Encode(response)
 }
 
 // Handler to get data from Firebase
@@ -62,16 +96,23 @@ func getDataHandler(w http.ResponseWriter, r *http.Request) {
 
 	ref := client.NewRef("car_detection")
 
-	// captura as últimas 1 sessões
+	// Pegar mais dados para ter um histórico melhor (últimas 3 sessões)
 	var raw map[string]map[string]carData
-	err := ref.OrderByKey().LimitToLast(1).Get(ctx, &raw)
+	err := ref.OrderByKey().LimitToLast(3).Get(ctx, &raw)
 	if err != nil {
-		http.Error(w, "Failed to retrieve last session", http.StatusInternalServerError)
-		log.Println("Firebase get error:", err)
+		log.Printf("Firebase get error: %v", err)
+		http.Error(w, "Failed to retrieve data from Firebase", http.StatusInternalServerError)
 		return
 	}
 
-	// como só pegamos 1 sessão, extrai ela
+	// Se não houver dados, retornar array vazio
+	if len(raw) == 0 {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]carData{})
+		return
+	}
+
+	// Extrair todos os dados e organizá-los
 	var result []carData
 	for _, timestamps := range raw {
 		for _, entry := range timestamps {
@@ -79,6 +120,13 @@ func getDataHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Log para debug
+	log.Printf("Retrieved %d records from Firebase", len(result))
+
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(result)
+	if err := json.NewEncoder(w).Encode(result); err != nil {
+		log.Printf("JSON encoding error: %v", err)
+		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+		return
+	}
 }

@@ -50,28 +50,83 @@ const TrafficDashboard = () => {
   const [error, setError] = useState(null);
   const [currentTime, setCurrentTime] = useState(new Date());
   const [lastUpdate, setLastUpdate] = useState(null);
+  const [connectionStatus, setConnectionStatus] = useState('connecting');
+
+  // Function to test API connection
+  const testConnection = async () => {
+    try {
+      const response = await fetch('http://localhost:8080/health');
+      if (response.ok) {
+        setConnectionStatus('connected');
+        return true;
+      } else {
+        setConnectionStatus('error');
+        return false;
+      }
+    } catch (err) {
+      setConnectionStatus('error');
+      return false;
+    }
+  };
 
   // Function to fetch data from API
   const fetchData = async () => {
     try {
       setError(null);
+      
+      // Test connection first
+      const isConnected = await testConnection();
+      if (!isConnected) {
+        throw new Error('Não foi possível conectar com a API. Verifique se o servidor está rodando.');
+      }
+
       const response = await fetch('http://localhost:8080/data');
       
       if (!response.ok) {
-        throw new Error(`Erro HTTP: ${response.status}`);
+        throw new Error(`Erro HTTP: ${response.status} - ${response.statusText}`);
       }
       
+      const contentType = response.headers.get("content-type");
+      if (!contentType || !contentType.includes("application/json")) {
+        throw new Error('Resposta da API não é um JSON válido');
+      }
+
       const rawData = await response.json();
       
+      console.log('Dados recebidos da API:', rawData);
+
+      // Verificar se recebemos dados válidos
+      if (!Array.isArray(rawData)) {
+        throw new Error('Formato de dados inválido recebido da API');
+      }
+
+      if (rawData.length === 0) {
+        setData([]);
+        setLastUpdate(new Date());
+        setLoading(false);
+        setConnectionStatus('connected');
+        return;
+      }
+
       // Transform the data to match the expected format
       const transformedData = rawData.map((item, index) => {
-        const date = new Date(item.timestamp * 1000); // Convert Unix timestamp to Date
+        // Usar timestamp como está ou criar um se não existir
+        let timestamp;
+        if (item.timestamp && item.timestamp > 0) {
+          timestamp = item.timestamp;
+        } else {
+          // Criar timestamp baseado no index se não existir
+          timestamp = Date.now() / 1000 - (rawData.length - index) * 300; // 5 minutos entre cada ponto
+        }
+
+        const date = new Date(timestamp * 1000);
+        
         return {
-          timestamp: item.timestamp,
-          current_cars: Math.round(item.current_cars),
+          timestamp: timestamp,
+          current_cars: Math.round(item.current_cars || 0),
           datetime: date.toISOString(),
-          rolling_average: item.rolling_average,
-          total_count: Math.round(item.total_count),
+          rolling_average: Number((item.rolling_average || 0).toFixed(1)),
+          total_count: Math.round(item.total_count || 0),
           hour: date.toLocaleTimeString('pt-BR', { 
             hour: '2-digit', 
             minute: '2-digit' 
@@ -82,13 +137,17 @@ const TrafficDashboard = () => {
       // Sort by timestamp to ensure chronological order
       transformedData.sort((a, b) => a.timestamp - b.timestamp);
       
+      console.log('Dados transformados:', transformedData);
+      
       setData(transformedData);
       setLastUpdate(new Date());
       setLoading(false);
+      setConnectionStatus('connected');
     } catch (err) {
       console.error('Erro ao buscar dados:', err);
       setError(err.message || 'Erro desconhecido ao carregar dados');
       setLoading(false);
+      setConnectionStatus('error');
     }
   };
 
@@ -109,11 +168,13 @@ const TrafficDashboard = () => {
   // Set up periodic data updates (every 30 seconds)
   useEffect(() => {
     const interval = setInterval(() => {
-      fetchData();
+      if (connectionStatus === 'connected') {
+        fetchData();
+      }
     }, 30000); // Update every 30 seconds
 
     return () => clearInterval(interval);
-  }, []);
+  }, [connectionStatus]);
 
   // Calculate statistics based on current data
   const latestData = data.length > 0 ? data[data.length - 1] : null;
@@ -129,14 +190,31 @@ const TrafficDashboard = () => {
       return [`${value} carros`, 'Fluxo Atual'];
     }
     if (name === 'rolling_average') {
-      return [`${value.toFixed(1)} carros`, 'Média Móvel'];
+      return [`${value} carros`, 'Média Móvel'];
     }
     return [value, name];
   };
 
   const handleRetry = () => {
     setLoading(true);
+    setConnectionStatus('connecting');
     fetchData();
+  };
+
+  const getConnectionStatusColor = () => {
+    switch (connectionStatus) {
+      case 'connected': return 'text-green-600';
+      case 'error': return 'text-red-600';
+      default: return 'text-yellow-600';
+    }
+  };
+
+  const getConnectionStatusText = () => {
+    switch (connectionStatus) {
+      case 'connected': return 'Conectado';
+      case 'error': return 'Erro de conexão';
+      default: return 'Conectando...';
+    }
   };
 
   return (
@@ -156,6 +234,9 @@ const TrafficDashboard = () => {
                 Última atualização: {lastUpdate.toLocaleTimeString('pt-BR')}
               </p>
             )}
+            <p className={`text-sm mt-1 ${getConnectionStatusColor()}`}>
+              Status: {getConnectionStatusText()}
+            </p>
           </div>
           <div className="flex items-center">
             {loading && (
@@ -193,7 +274,7 @@ const TrafficDashboard = () => {
         <StatCard
           icon={TrendingUp}
           title="Média Móvel"
-          value={latestData?.rolling_average?.toFixed(1) || '0.0'}
+          value={latestData?.rolling_average || '0.0'}
           subtitle="Últimos registros"
           color="#10B981"
           isLoading={loading && !latestData}
@@ -311,7 +392,10 @@ const TrafficDashboard = () => {
           <Car className="h-16 w-16 text-gray-300 mx-auto mb-4" />
           <h3 className="text-lg font-semibold text-gray-900 mb-2">Nenhum dado disponível</h3>
           <p className="text-gray-600 mb-4">
-            Não há dados de tráfego para exibir no momento.
+            {connectionStatus === 'error' 
+              ? 'Verifique se a API está rodando em http://localhost:8080'
+              : 'Não há dados de tráfego para exibir no momento.'
+            }
           </p>
           <button
             onClick={handleRetry}
@@ -347,6 +431,19 @@ const TrafficDashboard = () => {
           </div>
         </div>
       )}
+
+      {/* Debug Info (apenas em desenvolvimento) */}
+      {process.env.NODE_ENV === 'development' && (
+        <div className="mt-6 bg-gray-100 rounded-lg p-4">
+          <h3 className="text-sm font-semibold text-gray-700 mb-2">Debug Info</h3>
+          <p className="text-xs text-gray-600">
+            Status: {connectionStatus} | Dados: {data.length} registros | Carregando: {loading.toString()}
+          </p>
+          {error && <p className="text-xs text-red-600">Erro: {error}</p>}
+        </div>
+      )}
     </div>
   );
 };
+
+export default TrafficDashboard;
