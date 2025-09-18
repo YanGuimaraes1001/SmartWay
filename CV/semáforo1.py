@@ -4,266 +4,322 @@ import cv2
 import cvzone
 import time
 from collections import deque
-import firebase_admin
-from firebase_admin import credentials, db
 from datetime import datetime
+import psycopg2
+from psycopg2 import sql
 import os
 
-# Firebase initialization
-def initialize_firebase():
-    """Initialize Firebase - update paths and URL for your local setup"""
+# Firebase imports (comentados para teste local)
+# import firebase_admin
+# from firebase_admin import credentials, db
+
+# Configuração do banco PostgreSQL
+DB_CONFIG = {
+    'host': 'localhost',
+    'database': 'car_detection',
+    'user': 'projete',
+    'password': '12345678',
+    'port': 5432
+}
+
+def initialize_database():
+    """Inicializar conexão com PostgreSQL"""
     try:
-        # Update this path to your local service account key file
-        firebase_key_path = "firebaseKey.json"  # Put this in your project directory
-        
-        if not os.path.exists(firebase_key_path):
-            print("Warning: Firebase key not found. Firebase logging disabled.")
-            return False
-            
-        cred = credentials.Certificate(firebase_key_path)
-        firebase_admin.initialize_app(cred, {
-            'databaseURL': 'https://projetedb-2224f-default-rtdb.firebaseio.com/'  # Replace with your Firebase URL
-        })
-        print("Firebase initialized successfully")
+        conn = psycopg2.connect(**DB_CONFIG)
+        conn.close()
+        print("Conectado à DB PostgreSQL com sucesso")
         return True
     except Exception as e:
-        print(f"Firebase initialization failed: {e}")
+        print(f"Falha ao conectar à DB: {e}")
         return False
 
-# Initialize Firebase
-firebase_enabled = initialize_firebase()
+def send_to_database(total, current_cars, avg): 
+    """Enviar dados de detecção para PostgreSQL"""
+    if not database_enabled:
+        return
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        cursor = conn.cursor()
+        
+        insert_query = """
+        INSERT INTO veiculos (current_cars, rolling_average, total_count) 
+        VALUES (%s, %s, %s)"""
+        cursor.execute(insert_query, (current_cars, avg, total))
+        conn.commit()
+        cursor.close()
+        conn.close()
+        print(f"Dados enviados à database: Total={total}, Current={current_cars}, Avg={avg:.2f}")
+    except Exception as e:
+        print(f"Erro ao enviar dados para DB: {e}")
 
-# Create session ID for this detection run
-session_id = datetime.now().strftime("session_%Y%m%d_%H%M%S")
+# Firebase initialization (comentado para teste local)
+# def initialize_firebase():
+#     """Initialize Firebase - update paths and URL for your local setup"""
+#     try:
+#         firebase_key_path = "chaveFirebase.json"
+#         
+#         if not os.path.exists(firebase_key_path):
+#             print("Warning: Firebase key not found. Firebase logging disabled.")
+#             return False
+#             
+#         cred = credentials.Certificate(firebase_key_path)
+#         firebase_admin.initialize_app(cred, {
+#             'databaseURL': 'https://projetedb-2224f-default-rtdb.firebaseio.com/'
+#         })
+#         print("Firebase initialized successfully")
+#         return True
+#     except Exception as e:
+#         print(f"Firebase initialization failed: {e}")
+#         return False
 
-# Video source - update these paths for your local setup
-VIDEO_PATH = "cars.mp4"  # Put your video file in the project directory
-MASK_PATH = "mask-950x480.png"  # Optional mask file
-GRAPHICS_PATH = "graphics.png"  # Optional graphics overlay
+# Inicializar banco de dados
+database_enabled = initialize_database()
 
-# Check if video file exists
+# Configuração do vídeo
+VIDEO_PATH = "cars.mp4"
+MASK_PATH = "mask-950x480.png"  # Arquivo de máscara opcional
+
+# Verificar se o arquivo de vídeo existe
 if not os.path.exists(VIDEO_PATH):
-    print(f"Error: Video file '{VIDEO_PATH}' not found!")
-    print("Please place your video file in the same directory as this script")
+    print(f"Erro: Arquivo de vídeo '{VIDEO_PATH}' não encontrado!")
+    print("Coloque o arquivo de vídeo no mesmo diretório do script")
     exit()
 
 cap = cv2.VideoCapture(VIDEO_PATH)
 
-# Check if video opened successfully
 if not cap.isOpened():
-    print("Error: Could not open video file")
+    print("Erro: Não foi possível abrir o arquivo de vídeo")
     exit()
 
-# Frame skip configuration
-FRAME_SKIP = 2
+# Configuração otimizada de processamento de frames
+FRAME_SKIP = 1
 frame_count = 0
 
-# Firebase logging configuration
-FIREBASE_UPDATE_INTERVAL = 5  # Send data every 5 seconds
-last_firebase_update = 0
+# Configuração de logging para banco de dados
+DATABASE_UPDATE_INTERVAL = 5  # Atualizar banco a cada 5 segundos
+last_database_update = 0
 
-# Load YOLO model - it will download automatically if not present
-print("Loading YOLO model...")
-model = YOLO("yolov8l.pt")  # Will download if not present
-print("YOLO model loaded successfully")
+# Carregar modelo YOLO otimizado
+print("Carregando modelo YOLO...")
+model = YOLO("yolov8n.pt")  # Versão nano - mais rápida
+print("Modelo YOLO carregado com sucesso")
 
-# Only vehicle classes we care about
-VEHICLE_CLASSES = {"car": 2, "motorbike": 3, "bus": 5, "truck": 7}
+# Classes de veículos (lista otimizada)
+VEHICLE_CLASSES = {2, 3, 5, 7}  # carro, moto, ônibus, caminhão
 
-# Load images (optional - will skip if not found)
+# Carregar máscara (opcional)
 mask = None
-imgGraphics = None
-
 if os.path.exists(MASK_PATH):
     mask = cv2.imread(MASK_PATH)
-    print("Mask loaded successfully")
+    print("Máscara carregada com sucesso")
 else:
-    print(f"Warning: Mask file '{MASK_PATH}' not found - continuing without mask")
+    print(f"Aviso: Arquivo de máscara '{MASK_PATH}' não encontrado - continuando sem máscara")
 
-if os.path.exists(GRAPHICS_PATH):
-    imgGraphics = cv2.imread(GRAPHICS_PATH, cv2.IMREAD_UNCHANGED)
-    print("Graphics overlay loaded successfully")
-else:
-    print(f"Warning: Graphics file '{GRAPHICS_PATH}' not found - continuing without graphics overlay")
-
-# Counting line - you may need to adjust these coordinates based on your video
+# Configuração da linha de contagem
 limits = [400, 297, 673, 297]
 totalCount = []
 
-# Rolling average (30 seconds)
-WINDOW_SIZE = 30
+# Configuração da média móvel
+WINDOW_SIZE = 20  # Janela de 20 segundos
 detection_history = deque()
 
+# Nome da janela (constante para evitar múltiplas janelas)
+WINDOW_NAME = 'Detecção Otimizada de Carros'
+
 def euclidean_distance(a, b):
+    """Calcular distância euclidiana entre dois pontos"""
     return np.sqrt((a[0] - b[0])**2 + (a[1] - b[1])**2)
 
 def update_rolling_average(current_count):
+    """Atualizar média móvel das detecções"""
     current_time = time.time()
     detection_history.append((current_time, current_count))
 
-    # Remove old entries
-    while detection_history and (current_time - detection_history[0][0]) > WINDOW_SIZE:
+    # Remover entradas mais antigas que WINDOW_SIZE
+    cutoff_time = current_time - WINDOW_SIZE
+    while detection_history and detection_history[0][0] < cutoff_time:
         detection_history.popleft()
 
     return sum(count for _, count in detection_history) / len(detection_history) if detection_history else 0.0
 
-def send_to_firebase(total_crossed, current_cars, avg_cars):
-    """Send detection data to Firebase"""
-    if not firebase_enabled:
-        return
-        
-    try:
-        ref = db.reference(f'/car_detection/{session_id}')
-        data = {
-            'timestamp': int(time.time()),
-            'datetime': datetime.now().isoformat(),
-            'total_count': total_crossed,
-            'current_cars': current_cars,
-            'rolling_average': round(avg_cars, 2)
-        }
-        # Push data (creates unique key) or set with timestamp
-        ref.child(str(int(time.time()))).set(data)
-        print(f"Data sent to Firebase: {data}")
-    except Exception as e:
-        print(f"Firebase error: {e}")
+# Função Firebase (comentada para teste local)
+# def send_to_firebase(total_crossed, current_cars, avg_cars):
+#     """Send detection data to Firebase"""
+#     if not firebase_enabled:
+#         return
+#     try:
+#         ref = db.reference(f'/car_detection/{session_id}')
+#         data = {
+#             'timestamp': int(time.time()),
+#             'datetime': datetime.now().isoformat(),
+#             'total_count': total_crossed,
+#             'current_cars': current_cars,
+#             'rolling_average': round(avg_cars, 2)
+#         }
+#         ref.child(str(int(time.time()))).set(data)
+#         print(f"Data sent to Firebase: {data}")
+#     except Exception as e:
+#         print(f"Firebase error: {e}")
 
-# Tracking variables
+# Variáveis de rastreamento
 tracked_objects = {}
 next_id = 0
-MAX_DISTANCE = 50
+MAX_DISTANCE = 60
 
-print("Starting video processing...")
-print("Press 'q' to quit")
+print("Iniciando processamento otimizado de vídeo...")
+print("Pressione 'q' para sair")
 
-# Get video properties for display
+# Obter propriedades do vídeo
 fps = cap.get(cv2.CAP_PROP_FPS)
 total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-print(f"Video: {fps:.1f} FPS, {total_frames} frames")
+print(f"Vídeo: {fps:.1f} FPS, {total_frames} frames")
+
+# Criar janela uma única vez
+cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
+cv2.resizeWindow(WINDOW_NAME, 1200, 800)
 
 start_time = time.time()
 processed_frames = 0
 
-while True:
-    success, img = cap.read()
-    if not success:
-        print("End of video reached")
-        break
+try:
+    while True:
+        success, img = cap.read()
+        if not success:
+            print("Fim do vídeo alcançado")
+            break
 
-    frame_count += 1
-    if frame_count % FRAME_SKIP != 0:
-        continue
-    
-    processed_frames += 1
+        frame_count += 1
+        if frame_count % FRAME_SKIP != 0:
+            continue
+        
+        processed_frames += 1
 
-    # Apply mask if available
-    if mask is not None:
-        mask_resized = cv2.resize(mask, (img.shape[1], img.shape[0]))
-        if len(mask_resized.shape) == 3:
-            imgRegion = cv2.bitwise_and(img, mask_resized)
+        # Aplicar máscara se disponível
+        if mask is not None:
+            mask_resized = cv2.resize(mask, (img.shape[1], img.shape[0]))
+            if len(mask_resized.shape) == 3:
+                imgRegion = cv2.bitwise_and(img, mask_resized)
+            else:
+                mask_resized = cv2.cvtColor(mask_resized, cv2.COLOR_GRAY2BGR)
+                imgRegion = cv2.bitwise_and(img, mask_resized)
         else:
-            mask_resized = cv2.cvtColor(mask_resized, cv2.COLOR_GRAY2BGR)
-            imgRegion = cv2.bitwise_and(img, mask_resized)
-    else:
-        imgRegion = img.copy()
+            imgRegion = img.copy()
 
-    # Overlay graphics if available
-    if imgGraphics is not None:
-        img = cvzone.overlayPNG(img, imgGraphics, (0, 0))
+        # Executar detecção otimizada
+        results = model(imgRegion, stream=False, verbose=False)  # Changed stream=False
+        current_detections = []
 
-    # Run detection
-    results = model(imgRegion, stream=True)
-    current_detections = []
+        # Process results - fixed to handle single result properly
+        if results and len(results) > 0:
+            r = results[0]  # Take only the first result
+            boxes = r.boxes
+            if boxes is not None:
+                for box in boxes:
+                    x1, y1, x2, y2 = map(int, box.xyxy[0])
+                    conf = float(box.conf[0])
+                    cls = int(box.cls[0])
 
-    for r in results:
-        boxes = r.boxes
-        for box in boxes:
-            x1, y1, x2, y2 = map(int, box.xyxy[0])
-            conf = float(box.conf[0])
-            cls = int(box.cls[0])
+                    # Filtrar veículos otimizado
+                    if cls in VEHICLE_CLASSES and conf > 0.25:
+                        w, h = x2 - x1, y2 - y1
+                        cx, cy = x1 + w // 2, y1 + h // 2
+                        current_detections.append((cx, cy, x1, y1, w, h, conf))
 
-            # Filter for vehicles with good confidence
-            if cls in VEHICLE_CLASSES.values() and conf > 0.3:
-                w, h = x2 - x1, y2 - y1
-                cx, cy = x1 + w // 2, y1 + h // 2
-                current_detections.append((cx, cy, x1, y1, w, h, conf))
+        # Atualizar média móvel
+        avg_cars = update_rolling_average(len(current_detections))
 
-    # Update rolling average
-    avg_cars = update_rolling_average(len(current_detections))
+        # Rastreamento otimizado
+        new_tracked_objects = {}
+        used_ids = set()
 
-    # Update tracking
-    new_tracked_objects = {}
-    used_ids = set()
+        for cx, cy, x1, y1, w, h, conf in current_detections:
+            best_id = None
+            min_dist = MAX_DISTANCE
 
-    for cx, cy, x1, y1, w, h, conf in current_detections:
-        best_id = None
-        min_dist = MAX_DISTANCE
+            # Encontrar objeto mais próximo existente
+            for obj_id, (prev_cx, prev_cy) in tracked_objects.items():
+                if obj_id not in used_ids:
+                    dist = euclidean_distance((cx, cy), (prev_cx, prev_cy))
+                    if dist < min_dist:
+                        best_id = obj_id
+                        min_dist = dist
 
-        # Find closest existing object
-        for obj_id, (prev_cx, prev_cy) in tracked_objects.items():
-            if obj_id not in used_ids:
-                dist = euclidean_distance((cx, cy), (prev_cx, prev_cy))
-                if dist < min_dist:
-                    best_id = obj_id
-                    min_dist = dist
+            # Atribuir novo ID se nenhuma correspondência for encontrada
+            if best_id is None:
+                best_id = next_id
+                next_id += 1
 
-        # Assign new ID if no match found
-        if best_id is None:
-            best_id = next_id
-            next_id += 1
+            new_tracked_objects[best_id] = (cx, cy)
+            used_ids.add(best_id)
 
-        new_tracked_objects[best_id] = (cx, cy)
-        used_ids.add(best_id)
+            # Desenho simplificado
+            x2, y2 = x1 + w, y1 + h
+            cv2.rectangle(img, (x1, y1), (x2, y2), (255, 0, 255), 2)
+            cv2.putText(img, f'{conf:.2f}', (x1, max(35, y1)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 
-        # Draw detection with confidence
-        cvzone.cornerRect(img, (x1, y1, w, h), l=9, rt=2, colorR=(255, 0, 255))
-        cvzone.putTextRect(img, f'{conf:.2f}', (max(0, x1), max(35, y1)),
-                          scale=2, thickness=3, offset=10)
+            # Detecção de cruzamento de linha
+            if limits[0] < cx < limits[2] and limits[1] - 15 < cy < limits[1] + 15:
+                if best_id not in totalCount:
+                    totalCount.append(best_id)
+                    cv2.line(img, (limits[0], limits[1]), (limits[2], limits[3]), (0, 255, 0), 5)
 
-        # Check line crossing for counting
-        if limits[0] < cx < limits[2] and limits[1] - 15 < cy < limits[1] + 15:
-            if best_id not in totalCount:
-                totalCount.append(best_id)
-                cv2.line(img, (limits[0], limits[1]), (limits[2], limits[3]), (0, 255, 0), 5)
+        tracked_objects = new_tracked_objects
 
-    tracked_objects = new_tracked_objects
+        # Desenhar linha de contagem e exibir informações
+        cv2.line(img, (limits[0], limits[1]), (limits[2], limits[3]), (0, 0, 255), 3)
+        
+        # Display otimizado de texto
+        cv2.putText(img, f'Total: {len(totalCount)}', (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+        cv2.putText(img, f'Current: {len(current_detections)}', (50, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        cv2.putText(img, f'Avg ({WINDOW_SIZE}s): {avg_cars:.1f}', (50, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
 
-    # Draw counting line and display counts
-    cv2.line(img, (limits[0], limits[1]), (limits[2], limits[3]), (0, 0, 255), 5)
-    cv2.putText(img, str(len(totalCount)), (255, 100), cv2.FONT_HERSHEY_PLAIN, 5, (50, 50, 255), 8)
-    cv2.putText(img, f'Current: {len(current_detections)}', (50, 150), cv2.FONT_HERSHEY_PLAIN, 3, (0, 255, 0), 3)
-    cv2.putText(img, f'Avg (30s): {avg_cars:.1f}', (50, 200), cv2.FONT_HERSHEY_PLAIN, 3, (255, 255, 0), 3)
+        # Exibir FPS de processamento
+        if processed_frames > 0:
+            elapsed_time = time.time() - start_time
+            processing_fps = processed_frames / elapsed_time
+            cv2.putText(img, f'FPS: {processing_fps:.1f}', (50, 140), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 
-    # Display FPS information
-    if processed_frames > 0:
-        elapsed_time = time.time() - start_time
-        processing_fps = processed_frames / elapsed_time
-        cv2.putText(img, f'FPS: {processing_fps:.1f}', (50, 50), cv2.FONT_HERSHEY_PLAIN, 2, (255, 255, 255), 2)
+        # Atualizações otimizadas do banco de dados
+        current_time = time.time()
+        if current_time - last_database_update >= DATABASE_UPDATE_INTERVAL:
+            send_to_database(len(totalCount), len(current_detections), avg_cars)
+            last_database_update = current_time
 
-    # Send data to Firebase every FIREBASE_UPDATE_INTERVAL seconds
-    current_time = time.time()
-    if current_time - last_firebase_update >= FIREBASE_UPDATE_INTERVAL:
-        send_to_firebase(len(totalCount), len(current_detections), avg_cars)
-        last_firebase_update = current_time
+        # Exibir frame - usando nome de janela consistente
+        cv2.imshow(WINDOW_NAME, img)
+        
+        # Verificar se 'q' foi pressionado para sair
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord('q') or key == 27:  # 'q' or ESC
+            print("Saindo...")
+            break
+        
+        # Verificar se a janela foi fechada
+        if cv2.getWindowProperty(WINDOW_NAME, cv2.WND_PROP_VISIBLE) < 1:
+            print("Janela fechada pelo usuário")
+            break
 
-    # Display the frame - replaced cv2_imshow with cv2.imshow for local use
-    cv2.imshow('Car Detection', img)
+except KeyboardInterrupt:
+    print("\nInterrompido pelo usuário")
+except Exception as e:
+    print(f"Erro durante execução: {e}")
+finally:
+    # Limpeza garantida
+    cap.release()
+    cv2.destroyAllWindows()
     
-    # Check for 'q' key press to quit
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        print("Quitting...")
-        break
+    # Aguardar um pouco para garantir que as janelas sejam fechadas
+    cv2.waitKey(1)
+    
+    # Atualização final do banco de dados
+    if database_enabled and 'current_detections' in locals() and 'avg_cars' in locals():
+        send_to_database(len(totalCount), len(current_detections), avg_cars)
 
-# Cleanup
-cap.release()
-cv2.destroyAllWindows()
-
-# Final Firebase update
-if firebase_enabled:
-    send_to_firebase(len(totalCount), len(current_detections), avg_cars)
-
-print(f"\nProcessing complete!")
-print(f"Total cars counted: {len(totalCount)}")
-print(f"Frames processed: {processed_frames}")
+print(f"\nProcessamento completo!")
+print(f"Total de carros contados: {len(totalCount)}")
+print(f"Frames processados: {processed_frames}")
 if processed_frames > 0:
     elapsed_time = time.time() - start_time
-    print(f"Average processing FPS: {processed_frames/elapsed_time:.1f}")
+    print(f"FPS médio de processamento: {processed_frames/elapsed_time:.1f}")
+    if fps > 0:
+        print(f"Melhoria de desempenho: ~{((processed_frames/elapsed_time) / (fps/FRAME_SKIP)) * 100:.0f}% do tempo real")
