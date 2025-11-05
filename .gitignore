@@ -1,1 +1,10 @@
-CV/car_detection_env/
+*
+!*/
+!.gitignore
+!firebase_e_broker.py
+!ml.py
+!App.jsx
+!dashboard.jsx
+!semaforos.py
+!main.go
+
